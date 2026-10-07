@@ -2629,13 +2629,25 @@ bool check_experts_gguf(const std::string& gguf, const strata::kernels::cpu::Exp
 // #255, gopinath87607).  The caller checks the spans first (check_experts_gguf).
 // `unbuffered` (Windows, experts_unbuffered): each chunk's 4 KiB-aligned window is read with FILE_FLAG_NO_BUFFERING into
 // an aligned buffer and scattered into the blobs - no copy through the file cache when the drive is read anyway.
+// SYCL port: the header (include/strata/core/expert_source.hpp:767) declares six parameters, the last one
+// `const std::atomic<int>* ready` defaulted. This definition kept the old five, so a five-argument call matched
+// both and stopped the build:
+//   sycl/src/core/expert_source.cpp:2938:14: error: call to 'load_experts_gguf' is ambiguous
+// The parameter is ported rather than stubbed, mirroring the CUDA original (src/core/expert_source.cpp:2985), so
+// the port honours the contract instead of silently dropping it. The only call site in this tree passes no
+// `ready`, so the gate never fires here today.
 LoadStats load_experts_gguf(const std::string& gguf, uint8_t* dst, const strata::kernels::cpu::ExpertLayout& lay,
-                            int threads, bool unbuffered) {
+                            int threads, bool unbuffered, const std::atomic<int>* ready) {
     LoadStats st;
     st.layers = (uint64_t) lay.n_layers;
     const auto t0 = std::chrono::steady_clock::now();
     std::atomic<int64_t> next{0};
     std::atomic<bool> bad{false};
+    // `ready`: layer l is written only once *ready > l + 1 (a PinnedArena registering its slices meanwhile).
+    auto wait_ready = [ready](int64_t l) {
+        if (ready != nullptr)
+            while (ready->load(std::memory_order_acquire) <= l + 1) std::this_thread::yield();
+    };
 #if defined(_WIN32)
     if (unbuffered) {
         uint64_t max_chunk = 0;
@@ -2660,6 +2672,7 @@ LoadStats load_experts_gguf(const std::string& gguf, uint8_t* dst, const strata:
             for (;;) {
                 const int64_t l = next.fetch_add(1);
                 if (l >= lay.n_layers || bad) break;
+                wait_ready(l);
                 const auto& fm = lay.fmt[(size_t) l];
                 const uint64_t blob = lay.bytes[(size_t) l];
                 const uint64_t per[3] = {fm.up_off, fm.up_off, blob - fm.down_off};
@@ -2738,6 +2751,7 @@ LoadStats load_experts_gguf(const std::string& gguf, uint8_t* dst, const strata:
         for (;;) {
             const int64_t l = next.fetch_add(1);
             if (l >= lay.n_layers || bad) break;
+            wait_ready(l);
             const auto& fm = lay.fmt[(size_t) l];
             const uint64_t blob = lay.bytes[(size_t) l];
             const uint64_t per[3] = {fm.up_off, fm.up_off, blob - fm.down_off};
