@@ -49,7 +49,15 @@ if [ "${REINSTALL:-0}" = "1" ] || [ ! -f "$cfg" ]; then
   .venv/bin/python setup.py --setup --yes "$@"
   [ -e "/opt/strata/strata-$tag.json" ] && { cmp -s "/opt/strata/strata-$tag.json" "$cfg" || cp -f "/opt/strata/strata-$tag.json" "$cfg"; }
 else
-  [ -e "/opt/strata/strata-$tag.json" ] || ln -s "$cfg" "/opt/strata/strata-$tag.json"
+  # The persisted config on the volume is the source of truth, so relink to it on every start. Linking only
+  # when /opt/strata/strata-$tag.json is absent is issue #1244: a regular file left there by an earlier setup
+  # pass survives `docker restart`, the test is then true, and edits to $STRATA_DATA/config/strata-$tag.json
+  # are silently ignored - the container keeps serving the stale copy from its own filesystem.
+  if [ ! -s "$cfg" ] && [ -f "/opt/strata/strata-$tag.json" ]; then
+    cp -f "/opt/strata/strata-$tag.json" "$cfg"      # adopt a config that predates the config/ layout
+  fi
+  rm -f "/opt/strata/strata-$tag.json"
+  ln -s "$cfg" "/opt/strata/strata-$tag.json"
 fi
 
 # Later starts skip straight here: setup.py finds the installed config and
