@@ -17,10 +17,21 @@ Everything about the port itself — what is fast, what is not, what has been me
 
 - **Docker** (or Podman) with `--device /dev/dri` support. The image ships the *userspace* compute runtime; the
   **kernel driver is the host's** and cannot be shipped in an image.
-- **A kernel whose `xe` driver drives your card.** For Battlemage (Arc B-series, Pro B50/B60/B70) on Ubuntu 24.04
-  that means the hardware-enablement (HWE) kernel — Ubuntu Desktop 24.04 tracks HWE by default, a GA-kernel install
-  does not. Check with `lspci -nn -d 8086:` (you should see the card) and `ls /sys/bus/pci/drivers/xe` (the driver
-  bound to it). If the kernel does not drive the card, no container can.
+- **A kernel whose `xe` driver drives your card.** This is a precondition of *every* GPU container, not something
+  this image asks for that others do not: a container ships userspace and nothing else, so the kernel driver always
+  comes from the host. If another Xe image already runs on the machine - arcint, `kyuz0/intel-b70-ai-toolboxes`,
+  anything else that opens the card - then this box already satisfies it and there is nothing to do. Strata uses
+  the same Level Zero path those do.
+
+  Battlemage (Arc B-series, Pro B50/B60/B70) needs `xe` specifically: `i915` does not drive BMG. On **Ubuntu
+  24.04** that means the hardware-enablement (HWE) kernel - Ubuntu Desktop 24.04 tracks HWE by default, a
+  GA-kernel install does not. On **Ubuntu 26.04 LTS** it is already handled: 26.04 ships Linux 7.0, which carries
+  a mature `xe` KMD, so no HWE dance is needed and this is the better of the two. Check with `lspci -nn -d 8086:`
+  (the card is visible) and `ls /sys/bus/pci/drivers/xe` (the driver is bound to it).
+
+  The image is built on Ubuntu 24.04 userspace and that is fine on a 26.04 host: the only interface between them
+  is the kernel ABI on `/dev/dri/renderD*`, and the compute runtime in the image (26.31) is newer than the host
+  distribution, not older, so there is no version to catch up to.
 - **VRAM for the model.** A 24 GB card holds the Coder IQ1_M or the Flash-Next IQ2_XS with every expert resident;
   see the model table in [INTEL_ARC.md](INTEL_ARC.md).
 - **Disk.** The model is ~70 GB and the pack is written next to it. Give the `/data` volume room.
