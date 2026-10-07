@@ -1,0 +1,180 @@
+name: docker-arc
+
+# Strata for an Intel Arc (the SYCL port in sycl/): builds Dockerfile.arc on a CPU-only runner and pushes it
+# to GHCR. The engine is compiled ahead of time with ocloc, so no GPU is needed to build it.
+#
+# Nothing here can run the model: GitHub-hosted runners have no Intel GPU. The smoke steps are the checks a
+# machine without a card can answer, and they live in sycl/tools/test_arc_image.py so you can run the same
+# checks on the Arc box before trusting the image. What the first real start on the card should show is in
+# docs/ARC_DOCKER.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      aot:
+        description: "AOT device for the GPU code"
+        type: choice
+        default: bmg-g21
+        options:
+          - bmg-g21     # Arc Pro B60, B580, B570 (docs/INTEL_ARC.md)
+          - bmg-g31     # Arc Pro B70
+          - ""          # SPIR-V only: JIT at run time (slow starts; no ocloc needed)
+      push:
+        description: "Push the image to GHCR"
+        type: boolean
+        default: true
+      latest:
+        description: "Also tag it :latest (release builds)"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths:
+      - "Dockerfile.arc"
+      - "docker-entrypoint-arc.sh"
+      - "sycl/**"
+      - "setup.py"
+      - "serve/**"
+      - "requirements.txt"
+      - ".github/workflows/docker-arc.yml"
+  pull_request:
+    paths:
+      - "Dockerfile.arc"
+      - "docker-entrypoint-arc.sh"
+      - "sycl/**"
+      - "setup.py"
+      - "serve/**"
+      - "requirements.txt"
+      - ".github/workflows/docker-arc.yml"
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/strata-arc
+  # Pinned as a set. oneAPI 2026.1.1 with NEO 26.09 is the combination docs/INTEL.md's Arc numbers were made
+  # with; the compiler/runtime pair has to match, and the compute runtime has to be new enough for the card.
+  # Current versions: `apt-cache policy` after the repos are added, or the two repositories' Packages indexes
+  # (https://apt.repos.intel.com/oneapi and https://launchpad.net/~kobuk-team/+archive/ubuntu/intel-graphics).
+  ONEAPI_COMPILER: 2026.1.1-325
+  ONEAPI_RUNTIME: 2026.1.1-325
+  ONEAPI_MKL: 2026.1.0-236
+  ONEAPI_MKL_RUNTIME: 2026.1.0-236
+  OCLOC: 26.31.39395.14-1~24.04~ppa1
+  COMPUTE_RUNTIME: 26.31.39395.14-1~24.04~ppa1
+  LIBZE: 1.32.0-1~24.04~ppa1
+
+concurrency:
+  group: docker-arc-${{ github.ref }}-${{ inputs.aot }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write      # only used when PUSH is true; PR builds never push
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # This file lives on the default branch so that workflow_dispatch is registered at all (GitHub only offers the
+      # button, and only accepts a dispatch, for a workflow that exists on the default branch). The image itself is
+      # built from the branch that carries Dockerfile.arc, so on a ref without it there is nothing to build.
+      - name: Check this ref has the image to build
+        run: |
+          if [ ! -f Dockerfile.arc ]; then
+            echo "::error::Dockerfile.arc is not on '${GITHUB_REF_NAME}'."
+            echo "This workflow is registered on the default branch; build the image from the branch that has it:"
+            echo "  gh workflow run docker-arc.yml --ref arc-docker -f aot=bmg-g21 -f push=true"
+            exit 1
+          fi
+
+      - name: Free up disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          df -h /
+
+      - name: Decide the version, the tag and whether to push
+        id: decide
+        env:
+          AOT: ${{ inputs.aot }}
+          WANT_PUSH: ${{ inputs.push }}
+          WANT_LATEST: ${{ inputs.latest }}
+        run: |
+          set -eu
+          v=$(sed -n 's/^project(strata VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt | head -1)
+          [ -n "$v" ] || { echo "no version in CMakeLists.txt"; exit 1; }
+          aot="${AOT:-bmg-g21}"
+          name="$v-$aot"
+          push=true
+          [ "$GITHUB_EVENT_NAME" = "pull_request" ] && push=false
+          [ "$WANT_PUSH" = "false" ] && push=false
+          {
+            echo "name=$name"
+            echo "push=$push"
+            echo "tags=$IMAGE:$name"
+            if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$WANT_LATEST" = "true" ]; then
+              echo "tags=$IMAGE:$name"$'\n'"$IMAGE:latest"
+            fi
+          } >> "$GITHUB_OUTPUT"
+          echo "image $IMAGE:$name (push=$push)"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: steps.decide.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.arc
+          target: runtime
+          load: true
+          push: ${{ steps.decide.outputs.push == 'true' }}
+          tags: ${{ steps.decide.outputs.tags }}
+          build-args: |
+            SYCL_AOT=${{ inputs.aot || 'bmg-g21' }}
+            ONEAPI_COMPILER=${{ env.ONEAPI_COMPILER }}
+            ONEAPI_MKL=${{ env.ONEAPI_MKL }}
+            OCLOC=${{ env.OCLOC }}
+            ONEAPI_RUNTIME=${{ env.ONEAPI_RUNTIME }}
+            ONEAPI_MKL_RUNTIME=${{ env.ONEAPI_MKL_RUNTIME }}
+            COMPUTE_RUNTIME=${{ env.COMPUTE_RUNTIME }}
+            LIBZE=${{ env.LIBZE }}
+            JOBS=4
+          cache-from: type=gha,scope=arc-${{ inputs.aot || 'bmg-g21' }}
+          cache-to: type=gha,scope=arc-${{ inputs.aot || 'bmg-g21' }},mode=max
+
+      - name: Smoke - the image as the card will see it
+        run: |
+          set -euo pipefail
+          docker run --rm "${IMAGE}:${NAME}" .venv/bin/python sycl/tools/test_arc_image.py
+        env:
+          NAME: ${{ steps.decide.outputs.name }}
+
+      - name: Smoke - the entrypoint refuses to start without a GPU
+        # The runner has no /dev/dri, so the guard firing is the pass condition. Reaching the guard at all also
+        # proves the venv, the entry point and the config directory landed: a broken image stops earlier.
+        run: |
+          set +e
+          out=$(docker run --rm "${IMAGE}:${NAME}" 2>&1)
+          rc=$?
+          set -e
+          echo "$out"
+          if [ "$rc" -eq 0 ]; then echo "expected a non-zero exit with no GPU in the container"; exit 1; fi
+          echo "$out" | grep -q "/dev/dri" || { echo "the guard did not say why it stopped"; exit 1; }
+          echo "entrypoint guard OK"
+        env:
+          NAME: ${{ steps.decide.outputs.name }}
+
+      - name: Image size
+        if: always()
+        run: docker images --format '{{.Repository}}:{{.Tag}}  {{.Size}}' | grep strata-arc || true
