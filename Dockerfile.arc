@@ -131,15 +131,36 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-pip python3-venv libgomp1 libatomic1 curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Neither oneAPI runtime package drops an ld.so.conf.d entry, so add the trees ourselves. The globs are resolved
-# at build time, so a version bump does not need the paths edited.
-RUN set -ex \
-    && : > /etc/ld.so.conf.d/strata-oneapi.conf \
-    && for d in /opt/intel/oneapi/compiler/*/lib /opt/intel/oneapi/redist/lib /opt/intel/oneapi/compiler/*/opt/compiler/lib; do \
-         [ -d "$d" ] && echo "$d" >> /etc/ld.so.conf.d/strata-oneapi.conf; \
-       done \
+# Neither oneAPI runtime package drops an ld.so.conf.d entry, so add the trees ourselves. Discovered from what is
+# actually installed rather than hardcoded: the runtime package layout is not the compiler package layout, and the
+# first version of this step assumed /opt/intel/oneapi/compiler/*/lib, which the runtime image does not have.
+#
+# The `if` form is load-bearing, not style. The previous line was
+#     [ -d "$d" ] && echo "$d" >> conf
+# and when the last glob in the list missed, that `&&` list returned 1, the `for` loop returned 1, and the outer
+# `&& ldconfig` never ran - the RUN died with exit 1 before ldconfig, which reads like a missing library and is
+# really a shell exit-status bug.
+RUN set -eu \
+    && conf=/etc/ld.so.conf.d/strata-oneapi.conf \
+    && : > "$conf" \
+    && find /opt/intel -maxdepth 5 -type d -name lib 2>/dev/null \
+         | while IFS= read -r d; do \
+              if ls "$d"/*.so* >/dev/null 2>&1; then printf '%s\n' "$d"; fi; \
+            done \
+         | sort -u >> "$conf" \
+    && echo "--- $conf ---" && cat "$conf" \
     && ldconfig \
-    && ldconfig -p | grep -E 'libsycl\.so|libmkl_sycl_blas|libze_loader'
+    && missing=0 \
+    && for want in libsycl.so libmkl_sycl_blas libze_loader; do \
+         if ldconfig -p | grep -q "$want"; then echo "ok    $want"; \
+         else echo "MISS  $want"; missing=1; fi; \
+       done \
+    && if [ "$missing" -ne 0 ]; then \
+         echo "FATAL: a library the engine links against is not resolvable in the runtime image" >&2; \
+         echo "where things actually are:" >&2; \
+         find /opt/intel -maxdepth 4 -type d 2>/dev/null | head -60 >&2; \
+         exit 1; \
+       fi
 
 WORKDIR /opt/strata
 COPY . .
