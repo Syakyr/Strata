@@ -23,6 +23,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent        # the Strata checkout
@@ -94,13 +95,21 @@ def main() -> int:
     check("the wrapper fails loudly on a bad binary",
           w.returncode != 0 and "not an executable" in w.stderr, f"rc={w.returncode}")
 
-    # The fallback the image relies on: no STRATA_SYCL_BIN, so the wrapper looks in $STRATA_HOME (which is
-    # /opt/strata in the image, and this checkout when the test is run outside it).
-    w = subprocess.run([str(I.SYCL_WRAPPER), "--serve"], capture_output=True, text=True,
-                      env={k: v for k, v in os.environ.items() if k != "STRATA_SYCL_BIN"}
-                      | {"STRATA_HOME": str(ROOT)})
-    check("the wrapper falls back to $STRATA_HOME/engine-arc/strata", w.returncode == 0,
-          f"rc={w.returncode} {w.stderr.strip()[:100]}")
+    # The fallback the image relies on: no STRATA_SYCL_BIN, so the wrapper looks in $STRATA_HOME. Use a stub
+    # rather than the real engine - this test is about *path resolution*, and the real engine builds a SYCL
+    # context before it does anything else, so it aborts with "No device of requested type available" on any
+    # host without a card (including this CI runner). Asserting rc == 0 there would be testing the wrong thing.
+    with tempfile.TemporaryDirectory() as home:
+        stub = Path(home) / "engine-arc" / "strata"
+        stub.parent.mkdir(parents=True)
+        stub.write_text('#!/bin/sh\necho "stub engine resolved at $0"\n')
+        stub.chmod(0o755)
+        w = subprocess.run([str(I.SYCL_WRAPPER), "--serve"], capture_output=True, text=True,
+                         env={k: v for k, v in os.environ.items() if k != "STRATA_SYCL_BIN"}
+                         | {"STRATA_HOME": home})
+        check("the wrapper falls back to $STRATA_HOME/engine-arc/strata",
+              w.returncode == 0 and str(stub) in (w.stdout + w.stderr),
+              f"rc={w.returncode} out={(w.stdout + w.stderr).strip()[:120]}")
 
     # --- the card list without sysfs -----------------------------------------------------------------
     os.environ["STRATA_INTEL_GPUS"] = "Arc Pro B60:24,Arc Pro B60:24"
