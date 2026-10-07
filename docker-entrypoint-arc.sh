@@ -20,6 +20,8 @@
 #   PORT         the server's port                                (default 8080)
 #   API_KEY      required from clients if set - add one before exposing the port beyond localhost
 #   REINSTALL    1: run the setup pass again for a model that is already set up (change context, KV, cards)
+#   GGUF_DIR     a directory of GGUF files you already downloaded, used instead of fetching them
+#                (setup's --gguf-dir). Point it at the folder holding the two shards for the chosen quant.
 #
 # The Intel port has no vision encoder yet (docs/INTEL_ARC.md), so there is no VISION here: setup_intel.py
 # answers "none" for it. --low-ram is forced off there too: the port streams the experts into VRAM, so the
@@ -78,6 +80,7 @@ if [ "${REINSTALL:-0}" = "1" ] || [ ! -f "$cfg" ]; then
   if [ -n "$KV" ]; then set -- "$@" --kv "$KV"; fi
   if [ -n "$GPUS" ]; then set -- "$@" --gpus "$GPUS"; fi
   if [ -n "$LAYER_SPLIT" ]; then set -- "$@" --layer-split "$LAYER_SPLIT"; fi
+  if [ -n "${GGUF_DIR:-}" ]; then set -- "$@" --gguf-dir "$GGUF_DIR"; fi
   .venv/bin/python sycl/setup_intel.py --setup --yes "$@"
   [ -e "/opt/strata/strata-$tag.json" ] && { cmp -s "/opt/strata/strata-$tag.json" "$cfg" || cp -f "/opt/strata/strata-$tag.json" "$cfg"; }
 else
