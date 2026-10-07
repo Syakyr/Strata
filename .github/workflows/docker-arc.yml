@@ -182,9 +182,14 @@ jobs:
           cache-to: type=gha,scope=arc-${{ inputs.aot || 'bmg-g21' }},mode=max
 
       - name: Smoke - the image as the card will see it
+        # The device-free checks, run inside the built image. The runner has no /dev/dri, so the cards are named
+        # explicitly - that is the supported way to exercise this without a card, and the same flag a container
+        # that cannot see the host's /sys/class/drm needs. Without it the test's own guard stops it, which is the
+        # guard working as designed rather than the image being wrong.
         run: |
           set -euo pipefail
-          docker run --rm "${IMAGE}:${NAME}" .venv/bin/python sycl/tools/test_arc_image.py
+          docker run --rm -e STRATA_INTEL_GPUS="Arc Pro B60:24,Arc Pro B60:24" \
+            "${IMAGE}:${NAME}" .venv/bin/python sycl/tools/test_arc_image.py
         env:
           NAME: ${{ steps.decide.outputs.name }}
 
