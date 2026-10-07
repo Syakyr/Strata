@@ -1604,7 +1604,14 @@ static float* down_partials(sycl::queue* q) {
     return p;
 }
 
-void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, void* stream, unsigned long long* stamp_buf,
+// SYCL port: the header (include/strata/kernels/fused_gr.hpp) declares this `bool` - "true when it also wrote
+// the q8_1 images". The CUDA original (src/kernels/cuda/fused_gr.cu:1621) matches that. This DPCT-translated
+// copy still carried `void` from before that return type was introduced, so the two declarations differed only
+// in return type and the build stopped:
+//   error: functions that differ only in their return type cannot be overloaded
+// This port does not implement the q8_1 image write at all, so it reports false everywhere. No caller in the
+// SYCL tree reads the value (checked: no `= fused_gr_read_multi` / `return fused_gr_read_multi` under sycl/).
+bool fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, void* stream, unsigned long long* stamp_buf,
                          int stamp_i0) {
     if (n_tok < 1 || n_tok > kFusedGrMaxT || xn_scratch == nullptr) {
         std::fprintf(stderr, "fused_gr_read_multi: invalid arguments\n");
@@ -1752,7 +1759,7 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
         */
         const dpct::err0 e3 = 0;
 
-        return;
+        return false;
     }
     m.part = down_partials(st);
     {
@@ -1879,6 +1886,9 @@ void fused_gr_read_multi(const FusedGrArgs* a, int n_tok, float* xn_scratch, voi
     need to rewrite this code.
     */
     const dpct::err0 e = 0;
+
+    // Never wrote the q8_1 images - not implemented in this port. See the note on the signature.
+    return false;
 }
 
 bool fused_gr_supported(int64_t n_embd, int64_t hc, int64_t hc_lr) {
