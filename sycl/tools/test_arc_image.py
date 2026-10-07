@@ -60,8 +60,16 @@ def main() -> int:
         print("  [skip] ldd is not installed")
 
     r = subprocess.run([str(exe), "--help"], capture_output=True, text=True)
-    check("the engine runs to its usage line", r.returncode == 0 and len(r.stdout) > 0,
-          f"rc={r.returncode}, {len(r.stdout)} bytes")
+    # `--help` is not device-free: the engine builds its SYCL context before it prints usage, so on a machine
+    # with no Intel GPU it aborts with "No device of requested type available". That is the expected outcome in
+    # CI and on any build host without a card, so it counts as the binary having executed. What must NOT happen
+    # is a missing library, a segfault with no recognisable message, or silence - those still fail this check.
+    combined = (r.stdout or "") + (r.stderr or "")
+    no_device = "No device of requested type" in combined
+    usage = r.returncode == 0 and len(r.stdout) > 0
+    check("the engine executes (usage line, or the expected no-GPU abort)", usage or no_device,
+          f"rc={r.returncode}, {len(r.stdout)} bytes stdout, "
+          + ("reached SYCL init, no device present" if no_device else "no device error seen"))
 
     # --- the native (no docker-in-docker) wiring ------------------------------------------------------
     import setup_intel as I

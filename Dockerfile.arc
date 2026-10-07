@@ -187,13 +187,26 @@ RUN python3 -m venv .venv \
 COPY --from=builder /opt/strata/build/strata /opt/strata/engine-arc/strata
 
 # The build-time proof that the runtime package set is complete: every shared object the engine needs resolves,
-# and the binary runs far enough to print its usage (which happens before any device is opened). The full check
-# is sycl/tools/test_arc_image.py, which runs in CI and can be run on the Arc box before trusting the image.
-RUN set -ex \
+# and the binary actually executes. `--help` is NOT device-free - the engine builds its SYCL context before it
+# prints usage, so on a GPU-less builder it aborts with
+#     terminate called after throwing an instance of 'sycl::_V1::exception'
+#       what():  No device of requested type available
+# That is the expected outcome here and counts as a pass. Anything else - a missing library, a segfault with no
+# recognisable message, silence - fails the build. The full check is sycl/tools/test_arc_image.py, which is
+# device-free by design and can be run on the Arc box before trusting the image.
+RUN set -eu \
     && if ldd /opt/strata/engine-arc/strata | grep -q 'not found'; then \
          ldd /opt/strata/engine-arc/strata | grep 'not found'; exit 1; \
        fi \
-    && /opt/strata/engine-arc/strata --help > /dev/null \
+    && out=$(/opt/strata/engine-arc/strata --help 2>&1 || true) \
+    && if printf '%s' "$out" | grep -qi 'No device of requested type'; then \
+         echo 'engine executes and reaches SYCL init; no GPU on the builder, as expected'; \
+       elif printf '%s' "$out" | grep -qi 'usage'; then \
+         echo 'engine printed its usage line'; \
+       else \
+         echo 'unexpected: --help gave neither usage text nor the expected no-device abort' >&2; \
+         printf '%s\n' "$out" | head -20 >&2; exit 1; \
+       fi \
     && .venv/bin/python sycl/tools/test_arc_image.py
 
 VOLUME ["/data"]
