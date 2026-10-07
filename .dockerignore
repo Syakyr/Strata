@@ -2,6 +2,11 @@
 # first start (inside the container or on the /data volume).
 .git
 
+# CI never runs inside the image. Excluding it also means a workflow-only commit does not invalidate the
+# builder's `COPY . .` layer - without this, editing docker-arc.yml alone costs a full ~15 minute engine
+# recompile before the change is even exercised.
+.github
+
 # local Python environment (rebuilt in the image)
 .venv/
 __pycache__/
@@ -10,6 +15,7 @@ __pycache__/
 
 # setup.py outputs and downloads (engine, packs, models, logs)
 /engine/
+/engine-arc/
 /build/
 /build*/
 /dist/

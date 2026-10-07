@@ -17,6 +17,18 @@ setup.py's, unchanged.  What is replaced:
     sycl/serve/server_intel.py (serve/server.py plus the Intel Monitor readings and the model menu).
 
 When setup.py changes the steps this relies on, this stops with a message rather than writing a wrong config.
+
+Two ways to run the engine.  By default it runs in the strata-sycl-dev image, started by
+sycl/serve/strata-sycl.sh, which mounts the folder above this checkout at /work; that is the host install,
+where only the engine needs oneAPI.  With STRATA_SYCL_NATIVE=1 nothing shells out to Docker: the engine runs
+in this process' own environment, which is what the single-image install needs (Dockerfile.arc,
+docs/ARC_DOCKER.md) - the image carries the engine, the oneAPI runtime and the Arc compute runtime, and the
+GPU arrives through --device /dev/dri.  In that mode paths are used as they are (no /work remapping) and the
+config's exe is sycl/serve/strata-native.sh.
+
+Env this reads: STRATA_SYCL_NATIVE ("1" = no Docker), STRATA_SYCL_BIN (the engine binary, else
+build-sycl-aot/strata or build-sycl/strata), STRATA_SYCL_ROOT (what strata-sycl.sh mounts at /work),
+STRATA_INTEL_GPUS (the card list without sysfs: "Arc Pro B60:24,Arc Pro B60:24").
 """
 from __future__ import annotations
 
@@ -34,7 +46,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 import setup as S  # noqa: E402
 
-SYCL_WRAPPER = ROOT / "sycl" / "serve" / "strata-sycl.sh"
+# STRATA_SYCL_NATIVE=1: the engine runs here, not in a nested container (docs/ARC_DOCKER.md).
+NATIVE = (os.environ.get("STRATA_SYCL_NATIVE") or "").strip() == "1"
+SYCL_WRAPPER = ROOT / "sycl" / "serve" / ("strata-native.sh" if NATIVE else "strata-sycl.sh")
 SYCL_IMAGE = "strata-sycl-dev"
 SERVER = ROOT / "sycl" / "serve" / "server_intel.py"
 MOUNT = Path(os.environ.get("STRATA_SYCL_ROOT") or ROOT.parent)   # what strata-sycl.sh mounts at /work
@@ -48,9 +62,36 @@ INTEL_ARC = {"e223": ("Arc Pro B70", 32.0), "e221": ("Arc Pro B60", 24.0), "e211
              "56a5": ("Arc A380", 6.0), "56a6": ("Arc A310", 4.0), "5690": ("Arc A770M", 16.0)}
 
 
+def gpus_from_env():
+    """STRATA_INTEL_GPUS="Arc Pro B60:24,Arc Pro B60:24" (or just "24,24"): the card list without reading
+    sysfs.  For a container that does not show the host's /sys/class/drm, and for CI, which has no Arc at all.
+    Same shape as intel_gpus() returns; None when the variable is unset, so sysfs is used."""
+    raw = (os.environ.get("STRATA_INTEL_GPUS") or "").strip()
+    if not raw:
+        return None
+    out = []
+    for part in (p.strip() for p in raw.split(",")):
+        if not part:
+            continue
+        name, _, gb = part.partition(":")
+        try:
+            vram = float(gb) if gb.strip() else 0.0
+        except ValueError:
+            vram = -1.0
+        if vram <= 0:
+            S.fail(f'STRATA_INTEL_GPUS: "{part}" has no VRAM size above 0',
+                   'name it as NAME:GB, e.g. STRATA_INTEL_GPUS="Arc Pro B60:24,Arc Pro B60:24"')
+        out.append({"index": len(out), "name": name.strip() or f"Intel GPU {len(out) + 1}",
+                   "vram_gb": vram, "arch": "xe", "driver": "xe"})
+    return out or None
+
+
 def intel_gpus():
     """Intel discrete GPUs from sysfs: vendor 0x8086 under the xe or i915 driver, named by PCI device id. VRAM comes
-    from the id table, else from the size of the card's VRAM BAR."""
+    from the id table, else from the size of the card's VRAM BAR.  STRATA_INTEL_GPUS replaces the probe."""
+    from_env = gpus_from_env()
+    if from_env is not None:
+        return from_env
     found = []
     for card in sorted(Path("/sys/class/drm").glob("card[0-9]*")):
         if "-" in card.name:                            # connectors (card0-DP-1) share the card's device
@@ -79,13 +120,29 @@ def intel_gpus():
     return found
 
 
+def engine_binary() -> Path | None:
+    """The engine to run: STRATA_SYCL_BIN (relative to the checkout when it is not absolute), else the AOT build,
+    else the JIT build.  None when none of them is there."""
+    env_bin = (os.environ.get("STRATA_SYCL_BIN") or "").strip()
+    if env_bin:
+        p = Path(env_bin).expanduser()
+        if not p.is_absolute():
+            p = (ROOT / p).resolve()
+        return p if p.exists() else None
+    return next((b for b in (ROOT / "build-sycl-aot" / "strata", ROOT / "build-sycl" / "strata") if b.exists()), None)
+
+
 def sycl_engine():
     """The SYCL build: (binary, why-not)."""
     if S.WIN:
         return None, "the SYCL port runs on Linux only"
-    exe = next((b for b in (ROOT / "build-sycl-aot" / "strata", ROOT / "build-sycl" / "strata") if b.exists()), None)
+    exe = engine_binary()
     if exe is None:
-        return None, "it is not built (sycl/tools/build.sh; docs/INTEL.md)"
+        where = f"STRATA_SYCL_BIN={os.environ['STRATA_SYCL_BIN']}" if os.environ.get("STRATA_SYCL_BIN") \
+            else "build-sycl-aot/strata or build-sycl/strata"
+        return None, f"it is not built ({where}); sycl/tools/build.sh, or the image in docs/ARC_DOCKER.md"
+    if NATIVE:
+        return exe, None            # no nested container: this environment already has the oneAPI runtime
     if not shutil.which("docker"):
         return None, "docker is not installed (the engine runs in the oneAPI image)"
     if subprocess.run(["docker", "image", "inspect", SYCL_IMAGE], capture_output=True).returncode != 0:
@@ -95,7 +152,10 @@ def sycl_engine():
 
 def sycl_path(path) -> str:
     """A host path as the engine's container sees it: the folder above the Strata checkout (or STRATA_SYCL_ROOT) is
-    mounted at /work."""
+    mounted at /work.  In native mode (STRATA_SYCL_NATIVE=1) the engine runs where this script runs, so the path
+    is the path."""
+    if NATIVE:
+        return str(Path(path).resolve())
     p, root = Path(path).resolve(), MOUNT.resolve()
     try:
         return "/work/" + p.relative_to(root).as_posix()
@@ -145,12 +205,18 @@ def to_sycl(cfg: dict, exe: Path, ram: float, keep: dict) -> dict:
         drop(args, "--prefill", True)
         args += ["--prefill", "4096"]
     out = {k: v for k, v in cfg.items() if k not in ("lib_dirs", "env", "vision", "gpus")}
-    out.update({"backend": "sycl", "exe": str(SYCL_WRAPPER), "args": args, "sycl_root": str(MOUNT)})
+    out.update({"backend": "sycl", "exe": str(SYCL_WRAPPER), "args": args})
     env = {}
-    if exe != ROOT / "build-sycl-aot" / "strata":
-        env["STRATA_SYCL_BIN"] = str(exe.relative_to(ROOT))
-    if MOUNT.resolve() != ROOT.parent.resolve():
-        env["STRATA_SYCL_ROOT"] = str(MOUNT)
+    if NATIVE:
+        # strata-native.sh execs STRATA_SYCL_BIN; the absolute path, because the wrapper's own cwd is the
+        # server's, not necessarily this checkout's.
+        env["STRATA_SYCL_BIN"] = str(exe.resolve())
+    else:
+        out["sycl_root"] = str(MOUNT)
+        if exe != ROOT / "build-sycl-aot" / "strata":
+            env["STRATA_SYCL_BIN"] = str(exe.relative_to(ROOT))
+        if MOUNT.resolve() != ROOT.parent.resolve():
+            env["STRATA_SYCL_ROOT"] = str(MOUNT)
     if env:
         out["env"] = env
     out.update(keep)
@@ -187,15 +253,19 @@ def install(argv) -> None:
     def say_intel(msg=""):
         """setup's words for its AMD path and its RAM rule, said for the Intel card."""
         msg = str(msg).replace("(AMD, experimental: docs/AMD_HIP.md)", "(Intel Arc: the SYCL port, docs/INTEL.md)")
+        msg = msg.replace("(AMD: docs/AMD_HIP.md)", "(Intel Arc: the SYCL port, docs/INTEL.md)")
         msg = msg.replace("Your AMD GPUs:", "Your Intel GPUs:").replace("just run ./setup.sh", "just run sycl/setup_intel.py")
         msg = msg.replace(f"RAM: {fake_ram:.0f} GB", f"RAM: {real_ram:.0f} GB (the experts are streamed into VRAM)")
         if re.match(r"\s+\S+\s+needs ~\d+ GB RAM:", msg):   # --check's CUDA verdicts: replaced by the Intel one
             m = msg.split()[0]
             d = S.MODELS.get(m, {})
             shard1 = d.get("download_gb", 0) - 28.8          # all but the per-layer lookup table (read from disk)
-            room = intel[0]["vram_gb"] - 3 + max(0.0, real_ram - 10)   # VRAM, plus a pinned host mirror
+            one = intel[0]["vram_gb"] - 1.5                   # one card, less the KV and prompt buffers' room
+            every = sum(g["vram_gb"] - 1.5 for g in intel)    # a layer split across every card
+            room = every - 1.5 * len(intel) + max(0.0, real_ram - 10)   # VRAM, plus a pinned host mirror
             msg = (f"  {m:8s} ~{shard1:.0f} GB of weights: " +
-                   ("fits in VRAM" if shard1 <= intel[0]["vram_gb"] - 1.5 else
+                   ("fits in VRAM" if shard1 <= one else
+                    f"fits in VRAM across the {len(intel)} cards (layer split)" if shard1 <= every else
                     "fits with part of its experts mirrored in RAM (slower)" if shard1 <= room else "does not fit"))
         say(msg)
     S.say = say_intel
