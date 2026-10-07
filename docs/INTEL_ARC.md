@@ -9,7 +9,9 @@ The code is in `sycl/`, and the port's own notes, measurements and maintenance p
 we have not run it on an Arc. Every result on Arc hardware below comes from the community. The NVIDIA and AMD
 engines are unchanged: the Intel build is a separate CMake target, off by default.
 
-There is **no ready-made Intel engine** in the release zips. You build it from source on Linux.
+There is **no ready-made Intel engine** in the release zips. You build it from source on Linux, or you build the
+two-stage container image that does it for you and carries the oneAPI runtime and the Arc compute runtime with it:
+[ARC_DOCKER.md](ARC_DOCKER.md).
 
 ## What has been run, and by whom
 
@@ -62,7 +64,9 @@ images (not wired on Intel).
   Python 3.
 - For `setup --backend sycl` today: **Docker**. `sycl/setup_intel.py` runs the engine in the `strata-sycl-dev`
   image built from `sycl/tools/Dockerfile`. Note that the Dockerfile starts from a community llama.cpp SYCL image
-  (`ghcr.io/snailium/...`), not an Intel or Strata image.
+  (`ghcr.io/snailium/...`), not an Intel or Strata image. That is the development path, which needs a Docker
+  daemon on the host; the deployable single-image path (`Dockerfile.arc`, [ARC_DOCKER.md](ARC_DOCKER.md)) runs
+  the engine in the container's own environment instead, with `STRATA_SYCL_NATIVE=1`.
 - VRAM: the port keeps the experts on the card (`--stream-experts`). A 32 GB card holds the Coder IQ1_M or IQ2_XS.
   Smaller cards mirror part of the experts in RAM and are slower.
 
