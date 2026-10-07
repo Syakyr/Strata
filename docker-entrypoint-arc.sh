@@ -30,6 +30,15 @@
 set -e
 cd /opt/strata || exit 1
 
+# A command passed to `docker run` means the user wants something other than the default setup-and-serve, so
+# run exactly that. Before this the entrypoint ignored its arguments entirely: `docker run strata-arc bash`
+# fell straight through to the setup pass and started downloading a 29 GB model instead of giving a shell,
+# and the CI smoke step did the same thing on its way to a serve attempt. Placed before the GPU guard on
+# purpose - a shell inside the container is exactly what you want when the container cannot see a card.
+if [ "$#" -gt 0 ]; then
+  exec "$@"
+fi
+
 STRATA_DATA="${STRATA_DATA:-/data}"
 FAMILY="${FAMILY:-qwen}"
 MODEL="${MODEL:-IQ2_XS}"
